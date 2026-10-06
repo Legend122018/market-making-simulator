@@ -4,7 +4,7 @@ A Python simulation of a market maker trading a single instrument in a competiti
 
 ## Headline result
 
-Out of sample, over 1,000 unseen simulated trading days, after fees and close-out costs:
+Out of sample, over 1,000 unseen simulated trading days and after fees and close-out costs:
 
 | | Inventory-aware | Symmetric baseline |
 |---|---:|---:|
