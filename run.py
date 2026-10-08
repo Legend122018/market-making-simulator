@@ -9,6 +9,10 @@ results reproduce exactly:
   seed 2  out-of-sample test  (never seen during calibration)
   seed 3  stress test         (volatility +50%: the market re-prices its spread,
                                the strategies keep their trained settings)
+
+The assumption sweep re-runs the whole pipeline (market set-up, calibration and
+out-of-sample test) for each number of market makers sharing the best price and
+each quote-update speed, because those two assumptions drive the Sharpe ratio.
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ N_TRAIN, N_TEST = 500, 1000          # 500 training days; 1,000 test days, about
 RATIOS = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25]     # quote as a fraction of the market's half-spread
 GAMMAS = [0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]     # risk aversion for the inventory skew
 TOXICITIES = [0.0, 0.25, 0.5, 0.75]
+MAKERS = [1, 2, 3, 4, 5]          # market makers sharing the best price (queue share = 1 / makers)
+REFRESH = [1, 2, 3, 4]            # steps between quote updates
 
 
 def calibrate(market: Market, capital: float):
@@ -42,6 +48,24 @@ def calibrate(market: Market, capital: float):
     best_sym = max(sym_grid, key=lambda row: row["sharpe"])
     best_inv = max(inv_grid, key=lambda row: row["sharpe"])
     return best_sym, best_inv, sym_grid, inv_grid
+
+
+def assumption_sweep(market: Market):
+    """Out-of-sample Sharpe for each queue share and update speed, with the
+    market re-priced and both strategies re-calibrated every time."""
+    rows = []
+    for makers in MAKERS:
+        for refresh in REFRESH:
+            m = competitive(replace(market, queue_share=1 / makers, refresh_steps=refresh), seed=MARKET_SEED)
+            capital = m.max_inventory * m.s0
+            best_sym, best_inv, _, _ = calibrate(m, capital)
+            inv = summarise(simulate(InventoryAware(best_inv["spread_ratio"], best_inv["gamma"], m.sigma),
+                                     m, N_TEST, TEST_SEED), capital)
+            sym = summarise(simulate(Symmetric(best_sym["spread_ratio"]), m, N_TEST, TEST_SEED), capital)
+            rows.append({"makers": makers, "refresh_steps": refresh,
+                         "market_half_spread": m.market_half_spread,
+                         "inventory_aware_sharpe": inv["sharpe"], "symmetric_sharpe": sym["sharpe"]})
+    return rows
 
 
 def main():
@@ -83,6 +107,7 @@ def main():
             for b, m in sweep.items()
         ]
 
+    out["assumption_sweep"] = assumption_sweep(market)
     (RESULTS / "results.json").write_text(json.dumps(out, indent=2))
 
     oos, st = out["out_of_sample"], out["stress"]
@@ -108,6 +133,12 @@ def main():
     print("\nToxicity sweep (Sharpe):")
     for a, s in zip(out["toxicity_sweep"]["inventory_aware"], out["toxicity_sweep"]["symmetric"]):
         print(f"  toxicity {a['toxicity']:<5}{a['sharpe']:>10.2f}{s['sharpe']:>10.2f}")
+    print("\nAssumption sweep (inventory-aware Sharpe; rows = market makers at the best price,"
+          " columns = steps between quote updates):")
+    print("       " + "".join(f"{r:>8}" for r in REFRESH))
+    for makers in MAKERS:
+        cells = [row for row in out["assumption_sweep"] if row["makers"] == makers]
+        print(f"  {makers:>4} " + "".join(f"{c['inventory_aware_sharpe']:>8.2f}" for c in cells))
 
 
 if __name__ == "__main__":

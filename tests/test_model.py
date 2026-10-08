@@ -63,3 +63,21 @@ def test_reservation_price_leans_against_inventory():
 
 def test_max_drawdown():
     assert max_drawdown(np.array([5.0, -3.0, -4.0, 10.0, -2.0])) == 7.0
+
+
+def test_sharing_the_queue_cuts_ordinary_fills():
+    # In a still market every fill is an ordinary one, so sharing the best
+    # price with three rivals should cut fills to roughly a quarter.
+    alone = simulate(Symmetric(1.0), replace(STILL, queue_share=1.0, refresh_steps=1), 400, seed=11)
+    shared = simulate(Symmetric(1.0), replace(STILL, queue_share=0.25, refresh_steps=1), 400, seed=11)
+    ratio = shared.fills.mean() / alone.fills.mean()
+    assert 0.2 < ratio < 0.35
+
+
+def test_slower_quote_updates_cost_money():
+    # Same market and spread: quotes refreshed less often go stale and are
+    # picked off more, so the same quoter earns less.
+    moving = replace(M, market_half_spread=0.4, queue_share=1.0)
+    fast = simulate(Symmetric(1.0), replace(moving, refresh_steps=1), 1000, seed=13).pnl.mean()
+    slow = simulate(Symmetric(1.0), replace(moving, refresh_steps=4), 1000, seed=13).pnl.mean()
+    assert slow < fast

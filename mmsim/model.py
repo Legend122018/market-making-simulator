@@ -9,6 +9,12 @@ Real-market frictions that the original model leaves out:
   * latency: quotes are set from the current mid, but the price moves before
     they can be updated. A quote the price moves through is taken at once by
     faster traders, at the quote's own (now stale) price,
+  * slow updates: quotes are only refreshed every few steps, while the price
+    moves every step, so they spend longer stale,
+  * queue priority: ordinary orders at the best price are shared with the
+    other market makers quoting there, but a quote the price moves through is
+    taken in full. A market maker gets only its share of the harmless flow and
+    all of the harmful flow,
   * competition: the rest of the market quotes at a common half-spread, set to
     the level at which a naive market maker just breaks even (the zero-profit
     condition of a competitive market). Rivals have the same latency.
@@ -56,6 +62,8 @@ class Market:
     fee: float = 0.02              # cost per unit filled
     max_inventory: int = 25        # hard position limit, in units
     liquidation_cost: float = 0.25 # per-unit cost to flatten inventory at the close
+    queue_share: float = 0.25      # share of ordinary flow at the best price we receive (1 of 4 makers)
+    refresh_steps: int = 3         # steps between quote updates; the price moves every step
 
 
 @dataclass(frozen=True)
@@ -130,7 +138,10 @@ def simulate(strategy, market: Market, n_sessions: int, seed: int) -> Sessions:
 
     for step in range(market.n_steps):
         tau = market.horizon - step * dt
-        bid, ask = strategy.quotes(s, q, tau, market.market_half_spread)
+        # Quotes are refreshed every `refresh_steps` steps and otherwise left
+        # where they were, however far the price has moved since.
+        if step % market.refresh_steps == 0:
+            bid, ask = strategy.quotes(s, q, tau, market.market_half_spread)
 
         # Fixed number of draws per step regardless of strategy, so every
         # strategy sees the same random numbers for the same seed.
@@ -145,6 +156,9 @@ def simulate(strategy, market: Market, n_sessions: int, seed: int) -> Sessions:
         # inside the market's best price (rivals' quotes are equally stale).
         bid_competitive = (s - bid) <= market.market_half_spread + 1e-12
         ask_competitive = (ask - s) <= market.market_half_spread + 1e-12
+        # Time priority: at the best price, ordinary orders are shared with
+        # the other market makers in the queue.
+        rate = market.arrival_a * market.queue_share
 
         # Sell orders hit our bid, buy orders lift our ask. In an up-trend
         # buyers dominate; in a down-trend sellers do.
@@ -153,11 +167,12 @@ def simulate(strategy, market: Market, n_sessions: int, seed: int) -> Sessions:
         sell_flow = np.clip(1.0 - market.toxicity * regime, 0.0, None)
         buy_flow = np.clip(1.0 + market.toxicity * regime, 0.0, None)
         p_bid = bid_competitive * (1.0 - np.exp(
-            -market.arrival_a * sell_flow * np.exp(-market.arrival_k * np.maximum(d_bid, 0.0)) * dt))
+            -rate * sell_flow * np.exp(-market.arrival_k * np.maximum(d_bid, 0.0)) * dt))
         p_ask = ask_competitive * (1.0 - np.exp(
-            -market.arrival_a * buy_flow * np.exp(-market.arrival_k * np.maximum(d_ask, 0.0)) * dt))
+            -rate * buy_flow * np.exp(-market.arrival_k * np.maximum(d_ask, 0.0)) * dt))
 
-        # A stale quote the price has moved through is taken at once.
+        # A stale quote the price has moved through is taken at once, in full:
+        # queue position does not protect against being picked off.
         p_bid = np.where(d_bid < 0, 1.0, p_bid)
         p_ask = np.where(d_ask < 0, 1.0, p_ask)
 
